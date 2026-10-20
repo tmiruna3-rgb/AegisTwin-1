@@ -39,7 +39,7 @@ COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 # dirs to locations the `nginx` user can write, and hand it ownership of the html
 # and nginx runtime directories.
 RUN mkdir -p /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp \
-    && sed -i '/^pid /s#/var/run/nginx.pid#/tmp/nginx.pid#' /etc/nginx/nginx.conf \
+    && sed -i -E 's#^pid[[:space:]]+[^;]+;#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \
     && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /etc/nginx/conf.d /tmp/client_temp /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp
 
 USER nginx
