@@ -17,6 +17,24 @@ class SessionView(BaseModel):
     can_administer: bool
 
 
+@router.get("/header-probe")
+def temporary_header_probe(request: Request) -> dict[str, bool]:
+    """TEMPORARY: Verify that Azure strips forged identity headers.
+
+    Remove this endpoint immediately after the controlled deployment test.
+    Never return real principal IDs, cookies, or tokens.
+    """
+    return {
+        "forged_id_reached_backend": (
+            request.headers.get("X-MS-CLIENT-PRINCIPAL-ID")
+            == "fake-google-user"
+        ),
+        "forged_provider_reached_backend": (
+            request.headers.get("X-MS-CLIENT-PRINCIPAL-IDP")
+            == "google"
+        ),
+    }
+
 @router.get("", response_model=SessionView)
 def current_session(principal: CurrentPrincipal, request: Request) -> SessionView:
     """The caller's effective role, so the UI can label and gate actions
