@@ -49,14 +49,112 @@ class Principal:
     authenticated: bool
 
 
-def _decode_client_principal(header_value: str) -> dict[str, Any]:
+@dataclass(frozen=True)
+class EasyAuthIdentity:
+    """Identity material asserted by a verified Easy Auth boundary."""
+
+    provider: str | None
+    subject: str | None
+    principal_header_present: bool
+    principal_header_valid: bool
+    principal_id_header_present: bool
+    provider_header_present: bool
+
+
+_SUBJECT_CLAIM_TYPES = (
+    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier",
+    "sub",
+)
+
+
+def _decode_client_principal(header_value: str) -> dict[str, Any] | None:
     try:
         decoded = base64.b64decode(header_value, validate=True)
         parsed = json.loads(decoded)
     except (binascii.Error, ValueError, UnicodeDecodeError):
         logger.warning("Failed to decode X-MS-CLIENT-PRINCIPAL header; ignoring claims")
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return None
+    if not isinstance(parsed, dict):
+        logger.warning("X-MS-CLIENT-PRINCIPAL did not contain a JSON object; ignoring claims")
+        return None
+    return parsed
+
+
+def _normalise_nonempty_string(value: object, *, lowercase: bool = False) -> str | None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    return value.lower() if lowercase else value
+
+
+def _subject_claim(principal: dict[str, Any]) -> tuple[str | None, bool]:
+    claims = principal.get("claims")
+    if not isinstance(claims, list):
+        return None, False
+
+    subjects: set[str] = set()
+    for claim in claims:
+        if not isinstance(claim, dict):
+            return None, False
+        if claim.get("typ") not in _SUBJECT_CLAIM_TYPES:
+            continue
+        value = _normalise_nonempty_string(claim.get("val"))
+        if value is None:
+            return None, False
+        subjects.add(value)
+
+    if len(subjects) > 1:
+        return None, False
+    return (next(iter(subjects)) if subjects else None), True
+
+
+def read_easyauth_identity(request: Request) -> EasyAuthIdentity:
+    """Read identity headers without deciding whether the app trusts them.
+
+    Container Apps documents the encoded ``X-MS-CLIENT-PRINCIPAL`` claims as
+    the portable identity representation. Some provider/platform combinations
+    omit the convenience ``X-MS-CLIENT-PRINCIPAL-ID`` header, so the stable
+    subject claim is used as a fallback. Conflicting duplicate assertions fail
+    closed instead of choosing one silently.
+    """
+
+    principal_id_header = request.headers.get("X-MS-CLIENT-PRINCIPAL-ID")
+    principal_header = request.headers.get("X-MS-CLIENT-PRINCIPAL")
+    provider_header = request.headers.get("X-MS-CLIENT-PRINCIPAL-IDP")
+    principal_id = _normalise_nonempty_string(principal_id_header)
+    header_provider = _normalise_nonempty_string(provider_header, lowercase=True)
+
+    decoded = _decode_client_principal(principal_header) if principal_header is not None else None
+    decoded_provider: str | None = None
+    claim_subject: str | None = None
+    principal_header_valid = False
+    if decoded is not None:
+        decoded_provider = _normalise_nonempty_string(decoded.get("auth_typ"), lowercase=True)
+        claim_subject, claims_valid = _subject_claim(decoded)
+        principal_header_valid = decoded_provider is not None and claims_valid
+
+    malformed_assertion = bool(
+        (principal_header is not None and not principal_header_valid)
+        or (principal_id_header is not None and principal_id is None)
+        or (provider_header is not None and header_provider is None)
+    )
+    provider_conflict = bool(
+        header_provider and decoded_provider and header_provider != decoded_provider
+    )
+    subject_conflict = bool(principal_id and claim_subject and principal_id != claim_subject)
+    provider = header_provider or decoded_provider
+    subject = principal_id or claim_subject
+    identity_invalid = (
+        malformed_assertion or provider_conflict or subject_conflict or provider is None
+    )
+
+    return EasyAuthIdentity(
+        provider=None if identity_invalid else provider,
+        subject=None if identity_invalid else subject,
+        principal_header_present=principal_header is not None,
+        principal_header_valid=principal_header_valid,
+        principal_id_header_present=principal_id_header is not None,
+        provider_header_present=provider_header is not None,
+    )
 
 
 def resolve_principal(request: Request, settings: Settings) -> Principal:
@@ -80,26 +178,21 @@ def resolve_principal(request: Request, settings: Settings) -> Principal:
     # directly (there is no Easy Auth in front yet) must not be able to
     # spoof ANALYST/ADMIN.
     if settings.trust_easyauth_headers:
-        principal_id = request.headers.get("X-MS-CLIENT-PRINCIPAL-ID")
-        principal_header = request.headers.get("X-MS-CLIENT-PRINCIPAL")
-        principal_provider = request.headers.get("X-MS-CLIENT-PRINCIPAL-IDP", "").lower()
+        identity = read_easyauth_identity(request)
 
-        if principal_id:
-            # Header content is decoded for future claim-based use (e.g.
-            # name/roles claims) but role is currently derived solely from
-            # the verified principal id against the configured admin
-            # allow-list.
-            if principal_header:
-                _decode_client_principal(principal_header)
-            if principal_id in settings.admin_principal_ids:
-                role = Role.ADMIN
-            elif principal_provider == "google" and principal_id in settings.google_dashboard_principal_ids:
-                role = Role.VIEWER
+        if identity.subject:
+            if identity.subject in settings.admin_principal_ids:
+                resolved_role: Role | None = Role.ADMIN
+            elif (
+                identity.provider == "google"
+                and identity.subject in settings.google_dashboard_principal_ids
+            ):
+                resolved_role = Role.VIEWER
             else:
-                role = None
+                resolved_role = None
 
-            if role is not None:
-                return Principal(role=role, subject=principal_id, authenticated=True)
+            if resolved_role is not None:
+                return Principal(role=resolved_role, subject=identity.subject, authenticated=True)
 
     if settings.allow_anonymous_viewer:
         return Principal(role=Role.VIEWER, subject=None, authenticated=False)

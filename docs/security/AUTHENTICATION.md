@@ -9,8 +9,11 @@ model and role semantics, not the per-route enumeration.
 ## Trust model: `TRUST_EASYAUTH_HEADERS` gates Easy Auth headers, defaulting to false
 
 `backend/app/core/auth.py`'s `resolve_principal` can derive the caller's
-identity from the `X-MS-CLIENT-PRINCIPAL-ID` (and, for future claim use,
-`X-MS-CLIENT-PRINCIPAL`) HTTP headers — but **only when
+identity from `X-MS-CLIENT-PRINCIPAL-ID`, or from the stable subject claim in
+the encoded `X-MS-CLIENT-PRINCIPAL` header when Azure omits that convenience
+header. It uses `X-MS-CLIENT-PRINCIPAL-IDP` (with the encoded principal's
+`auth_typ` as a fallback) to identify the provider. These values affect access
+**only when
 `Settings.trust_easyauth_headers` is explicitly `True`**
 (`TRUST_EASYAUTH_HEADERS` env var). This defaults to `False` everywhere,
 including production, and is a completely separate switch from
@@ -83,8 +86,63 @@ caller whose role is below `minimum`.
 | Role | How it is granted |
 |---|---|
 | `VIEWER` | Default for anonymous (unauthenticated) requests, when `ALLOW_ANONYMOUS_VIEWER=true` (the default). No principal header required, regardless of `TRUST_EASYAUTH_HEADERS`. |
-| `ANALYST` | **Only when `TRUST_EASYAUTH_HEADERS=true`**: any request carrying a valid `X-MS-CLIENT-PRINCIPAL-ID` header — i.e. any authenticated Entra principal, with no further allow-listing. When `TRUST_EASYAUTH_HEADERS=false` (the default), this header is ignored and cannot grant ANALYST. |
-| `ADMIN` | **Only when `TRUST_EASYAUTH_HEADERS=true`**: an authenticated principal whose `X-MS-CLIENT-PRINCIPAL-ID` value appears in the `ADMIN_PRINCIPAL_IDS` configuration list (`backend/app/core/config.py`). Also ignored entirely when `TRUST_EASYAUTH_HEADERS=false`. |
+| `ANALYST` | Not granted by the current Google dashboard flow. Authentication alone never grants operation privileges. |
+| `ADMIN` | **Only when `TRUST_EASYAUTH_HEADERS=true`**: an authenticated principal whose stable ID appears in `ADMIN_PRINCIPAL_IDS`. Also ignored entirely when `TRUST_EASYAUTH_HEADERS=false`. |
+
+An authenticated Google identity receives authenticated `VIEWER` access only
+when its stable ID is explicitly present in `GOOGLE_DASHBOARD_PRINCIPAL_IDS`.
+An unlisted Google identity stays anonymous, and an approved Google viewer
+still cannot call `ANALYST` or `ADMIN` routes.
+
+## Temporary Google identity enrollment diagnostic
+
+`GET /api/v1/session/header-probe` is a temporary, disabled-by-default
+diagnostic for the post-deployment verification phase. It is hidden with 404
+unless both of these settings are supplied:
+
+- `AUTH_IDENTITY_DIAGNOSTIC_ENABLED=true`
+- `AUTH_IDENTITY_DIAGNOSTIC_KEY=<high-entropy one-time value>`
+
+The caller must send the key in `X-Aegis-Identity-Diagnostic-Key`. The HTTP
+response reports header presence, decoded-principal validity, whether the
+provider is Google, whether a stable subject was found, and whether header
+trust is currently enabled. Only a key-authorized request carrying a complete,
+consistent Google identity receives `google_principal_id`; unauthorized callers
+receive only 404. The response is marked `Cache-Control: no-store`. Claims,
+email addresses, cookies, tokens, and diagnostic keys are never returned, and
+the principal ID is never written to application logs.
+
+Use the diagnostic in this order:
+
+1. Leave `TRUST_EASYAUTH_HEADERS=false` and the Google allowlist empty.
+2. Generate a one-time random key of at least 32 characters. Store it as
+   `auth-identity-diagnostic-key` in the existing Key Vault, then set the
+   protected GitHub `production` Environment variable
+   `AUTH_IDENTITY_DIAGNOSTIC_ENABLED=true`. The Bicep release template exposes
+   it to the backend only through a Key Vault-backed Container App secret
+   reference; the value never enters GitHub Actions or a Bicep parameter.
+3. From an unauthenticated client, send forged `X-MS-CLIENT-PRINCIPAL*`
+   headers plus the diagnostic key. All identity presence flags must be false.
+   This is the live ingress-sanitization check; local tests cannot prove it.
+4. Sign in with the approved Google account. In that same browser session,
+   call the endpoint with the one-time key in
+   `X-Aegis-Identity-Diagnostic-Key`. Require
+   `principal_header_valid=true`, `provider_is_google=true`, and
+   `stable_principal_id_present=true`.
+5. Copy the returned `google_principal_id` directly into the protected
+   `GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON` GitHub Environment variable. Do not
+   paste it into tickets, chat, ordinary logs, or command history.
+6. Add only that ID to the allowlist. After the forged-header
+   check has passed, set `TRUST_EASYAUTH_HEADERS=true` in the same controlled
+   release. Do not put the ID in `ADMIN_PRINCIPAL_IDS` unless separate admin
+   approval is intended.
+7. Verify the account receives authenticated `VIEWER` access and receives 403
+   from representative `ANALYST` and `ADMIN` operations.
+8. Immediately set `AUTH_IDENTITY_DIAGNOSTIC_ENABLED=false`, deploy that
+   disabled state, delete the one-time Key Vault secret, clear browser console
+   history, and remove
+   `temporary_header_probe`, `HeaderProbeView`, and the two diagnostic settings
+   from the next code release.
 
 If `ALLOW_ANONYMOUS_VIEWER=false` and no principal header resolves to a role
 (either because none was sent, or because `TRUST_EASYAUTH_HEADERS=false`

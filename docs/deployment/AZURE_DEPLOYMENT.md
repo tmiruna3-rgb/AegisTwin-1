@@ -114,25 +114,27 @@ existing RG-scoped privileges are exactly sufficient for it.
    block everyone else.
 
 8. **Verify the sign-in flow actually works**: visit
-   `https://<containerAppFqdn>/.auth/login/aad` (or whichever provider path
-   applies) and confirm a real Microsoft sign-in completes successfully.
+   `https://<containerAppFqdn>/.auth/login/google` and confirm a real Google
+   sign-in completes successfully.
 
 9. **Verify the authenticated identity headers** reach the backend as
-   expected — e.g. a temporary authenticated request/log check confirming
-   `X-MS-CLIENT-PRINCIPAL-ID` is present and is genuinely Easy-Auth-issued
-   (not something a direct, unauthenticated caller could forge, since the
-   backend is only reachable through the nginx sidecar and Container Apps
-   ingress with Easy Auth in front of it).
+   expected — use the temporary, operator-keyed diagnostic documented in
+   `docs/security/AUTHENTICATION.md` to confirm the encoded
+   `X-MS-CLIENT-PRINCIPAL` contains a stable Google subject. Also prove that
+   externally forged `X-MS-CLIENT-PRINCIPAL*` headers do not reach the
+   backend. Local tests are not evidence for this ingress property.
 
 10. **Only then, enable `TRUST_EASYAUTH_HEADERS=true`** on the Container
     App's backend container (an app setting/env var update + new revision)
     and redeploy. See `docs/security/AUTHENTICATION.md` for exactly why this
     ordering matters and what stays unsafe before this step.
 
-11. **Test VIEWER / ANALYST / ADMIN** against the live deployment:
-    anonymous read access, an authenticated-but-non-admin sign-in resolving
-    to ANALYST, and a sign-in whose principal ID has been added to
-    `ADMIN_PRINCIPAL_IDS` resolving to ADMIN.
+11. **Test authorization boundaries** against the live deployment: anonymous
+    read access remains anonymous `VIEWER`; an approved Google principal in
+    `GOOGLE_DASHBOARD_PRINCIPAL_IDS` becomes authenticated `VIEWER` but is
+    denied `ANALYST` and `ADMIN` operations; an unapproved Google identity
+    remains anonymous. Test `ADMIN` separately only if an explicitly approved
+    principal has been added to `ADMIN_PRINCIPAL_IDS`.
 
 12. **Create the GitHub `production` Environment** (see below) — a one-time
     manual GitHub Settings action.
@@ -219,7 +221,9 @@ Settings → Secrets and variables → Actions → Variables:
 | `AZURE_SUBSCRIPTION_ID` | Target subscription ID |
 | `ACR_NAME` | The **actual deployed** registry name — read it from PASS 1's `acrLoginServer` output (it is `acraegisarenadev` plus a short generated suffix, e.g. `acraegisarenadevab12`, stripped of the trailing `.azurecr.io`), not the bare `acraegisarenadev` base name |
 | `TRUST_EASYAUTH_HEADERS` | `false` until Easy Auth is configured and verified; then `true` so later releases preserve the verified trust boundary |
+| `AUTH_IDENTITY_DIAGNOSTIC_ENABLED` | `false` normally; temporarily `true` only while enrolling an approved Google identity using the existing Key Vault secret `auth-identity-diagnostic-key` |
 | `ADMIN_PRINCIPAL_IDS_JSON` | JSON array of verified Entra principal object IDs granted ADMIN, for example `["00000000-0000-0000-0000-000000000000"]`; use `[]` before configuration |
+| `GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON` | JSON array of verified Google stable principal IDs granted authenticated VIEWER dashboard access; use `[]` before enrollment |
 
 These are identifiers, not credentials — there is no secret material in any
 of them, which is why they are GitHub *variables* rather than *secrets*
@@ -285,13 +289,15 @@ every Azure deployment is an explicit, manual action.
 ### Enabling `trustEasyAuthHeaders=true` on a later release
 
 Once Easy Auth has been configured and verified (steps 5–9 of the ordered
-sequence above), subsequent releases should keep granting real ANALYST/ADMIN
-access, which requires `TRUST_EASYAUTH_HEADERS=true` on the Container App.
+sequence above), subsequent releases can grant allowlisted Google VIEWER and
+explicit ADMIN access, which requires `TRUST_EASYAUTH_HEADERS=true` on the Container App.
 The workflow cannot determine whether Easy Auth has been verified, so its
-secure fallback remains `false`. After verification, set these two variables
+secure fallback remains `false`. After verification, set these variables
 on the protected GitHub `production` Environment:
 
 - `TRUST_EASYAUTH_HEADERS=true`
+- `GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON` to the JSON array of approved Google
+  stable principal IDs
 - `ADMIN_PRINCIPAL_IDS_JSON` to the JSON array of approved admin object IDs
 
 Every subsequent manual workflow release then supplies both values to Bicep.
@@ -304,6 +310,7 @@ az deployment group create \
   --parameters acrName=<the deployed ACR name> \
   --parameters imageTag=<git-sha> \
   --parameters trustEasyAuthHeaders=true \
+  --parameters googleDashboardPrincipalIds='["<verified-google-principal-id>"]' \
   --parameters adminPrincipalIds='["<verified-admin-object-id>"]'
 ```
 

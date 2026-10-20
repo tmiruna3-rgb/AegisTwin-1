@@ -83,9 +83,36 @@ def test_azure_container_app_keeps_the_hardened_single_replica_boundary() -> Non
 
 def test_azure_release_preserves_verified_authentication_configuration() -> None:
     workflow = _read(".github/workflows/deploy-azure.yml")
+    app_template = _read("infra/azure/app.bicep")
+    module = _read("infra/azure/modules/containerapp.bicep")
     assert "TRUST_EASYAUTH_HEADERS: ${{ vars.TRUST_EASYAUTH_HEADERS || 'false' }}" in workflow
+    assert (
+        "AUTH_IDENTITY_DIAGNOSTIC_ENABLED: "
+        "${{ vars.AUTH_IDENTITY_DIAGNOSTIC_ENABLED || 'false' }}"
+    ) in workflow
     assert "ADMIN_PRINCIPAL_IDS_JSON: ${{ vars.ADMIN_PRINCIPAL_IDS_JSON || '[]' }}" in workflow
+    assert (
+        "GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON: "
+        "${{ vars.GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON || '[]' }}"
+    ) in workflow
     assert '--parameters trustEasyAuthHeaders="$TRUST_EASYAUTH_HEADERS"' in workflow
+    assert (
+        '--parameters authIdentityDiagnosticEnabled="$AUTH_IDENTITY_DIAGNOSTIC_ENABLED"'
+        in workflow
+    )
     assert '--parameters adminPrincipalIds="$ADMIN_PRINCIPAL_IDS_JSON"' in workflow
+    assert (
+        '--parameters googleDashboardPrincipalIds="$GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON"'
+        in workflow
+    )
     assert "TRUST_EASYAUTH_HEADERS must be exactly 'true' or 'false'" in workflow
+    assert "AUTH_IDENTITY_DIAGNOSTIC_ENABLED must be exactly 'true' or 'false'" in workflow
     assert "ADMIN_PRINCIPAL_IDS_JSON must be a JSON array" in workflow
+    assert "param containerAppName string = 'ca-aegisarena-clean'" in app_template
+    assert "param authIdentityDiagnosticEnabled bool = false" in app_template
+    assert "param authIdentityDiagnosticEnabled bool = false" in module
+    assert "param trustEasyAuthHeaders bool = false" in app_template
+    assert "param googleDashboardPrincipalIds array = []" in app_template
+    assert "secretRef: authIdentityDiagnosticSecretName" in module
+    assert "Microsoft.App/containerApps/authConfigs" not in app_template
+    assert "Microsoft.App/containerApps/authConfigs" not in module

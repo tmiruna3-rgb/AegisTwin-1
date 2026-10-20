@@ -18,7 +18,7 @@
 param location string
 
 @description('Container App name.')
-param containerAppName string = 'ca-aegisarena-dev'
+param containerAppName string = 'ca-aegisarena-clean'
 
 @description('Resource ID of the Container Apps Environment (Consumption).')
 param containerAppsEnvironmentId string
@@ -57,6 +57,9 @@ verified it is genuinely fronting the backend — never as a default.
 ''')
 param trustEasyAuthHeaders bool = false
 
+@description('Temporarily enables the operator-keyed Google identity enrollment diagnostic. The key is read from the existing Key Vault secret auth-identity-diagnostic-key.')
+param authIdentityDiagnosticEnabled bool = false
+
 @description('Container Apps Environment storage (Azure Files) mounted at /data for model artifacts. Empty = no mount: artifacts then live on the ephemeral container filesystem and are rebuilt deterministically on first use after a restart.')
 param modelArtifactStorageName string = 'modelartifacts'
 
@@ -65,6 +68,8 @@ var backendImage = '${acrLoginServer}/aegisarena/backend:${imageTag}'
 // Container Apps' native Key Vault secret reference wants the secret's full
 // vault URL (not just the vault URI) — keyVaultUri already ends in '/'.
 var databaseUrlSecretUri = '${keyVaultUri}secrets/database-url'
+var authIdentityDiagnosticSecretName = 'auth-identity-diagnostic-key'
+var authIdentityDiagnosticSecretUri = '${keyVaultUri}secrets/${authIdentityDiagnosticSecretName}'
 
 resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
   name: containerAppName
@@ -96,13 +101,24 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
       // current secret value at revision start using appIdentityId (which
       // already holds Key Vault Secrets User on the vault). The raw
       // connection string never appears in this template or in params.
-      secrets: [
-        {
-          name: 'database-url'
-          keyVaultUrl: databaseUrlSecretUri
-          identity: appIdentityId
-        }
-      ]
+      secrets: concat(
+        [
+          {
+            name: 'database-url'
+            keyVaultUrl: databaseUrlSecretUri
+            identity: appIdentityId
+          }
+        ],
+        authIdentityDiagnosticEnabled
+          ? [
+              {
+                name: authIdentityDiagnosticSecretName
+                keyVaultUrl: authIdentityDiagnosticSecretUri
+                identity: appIdentityId
+              }
+            ]
+          : []
+      )
     }
     template: {
       containers: [
@@ -135,11 +151,12 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
         {
           name: 'backend'
           image: backendImage
-          env: [
-            {
-              name: 'DATABASE_URL'
-              secretRef: 'database-url'
-            }
+          env: concat(
+            [
+              {
+                name: 'DATABASE_URL'
+                secretRef: 'database-url'
+              }
             {
               name: 'ENVIRONMENT'
               value: 'production'
@@ -183,11 +200,24 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
               name: 'CORS_ORIGINS'
               value: 'https://${containerAppName}.internal.invalid'
             }
-            {
-              name: 'MODEL_ARTIFACT_DIR'
-              value: '/data/models'
-            }
-          ]
+              {
+                name: 'MODEL_ARTIFACT_DIR'
+                value: empty(modelArtifactStorageName) ? '/tmp/aegisarena-models' : '/data/models'
+              }
+            ],
+            authIdentityDiagnosticEnabled
+              ? [
+                  {
+                    name: 'AUTH_IDENTITY_DIAGNOSTIC_ENABLED'
+                    value: 'true'
+                  }
+                  {
+                    name: 'AUTH_IDENTITY_DIAGNOSTIC_KEY'
+                    secretRef: authIdentityDiagnosticSecretName
+                  }
+                ]
+              : []
+          )
           volumeMounts: empty(modelArtifactStorageName)
             ? []
             : [
@@ -197,8 +227,8 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
                 }
               ]
           resources: {
-            cpu: json('0.25')
-            memory: '0.5Gi'
+            cpu: json('0.5')
+            memory: '1Gi'
           }
           // Mapped per docs/DEPLOYMENT_REQUIREMENTS.md's
           // startup/liveness/readiness split: startup gates on the same

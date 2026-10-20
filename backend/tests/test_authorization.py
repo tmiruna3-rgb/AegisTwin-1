@@ -29,6 +29,8 @@ verified (see docs/security/AUTHENTICATION.md).
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, cast
@@ -45,6 +47,7 @@ from app.services.model_artifact_service import model_artifact_service
 
 PRINCIPAL_ID_HEADER = "X-MS-CLIENT-PRINCIPAL-ID"
 PRINCIPAL_HEADER = "X-MS-CLIENT-PRINCIPAL"
+PRINCIPAL_IDP_HEADER = "X-MS-CLIENT-PRINCIPAL-IDP"
 
 
 @pytest.fixture(autouse=True)
@@ -99,6 +102,16 @@ def _run_create_payload() -> dict[str, Any]:
 
 def _autonomy_autonomous_payload(updated_by: str) -> dict[str, Any]:
     return {"mode": "autonomous", "updated_by": updated_by, "confirm": True}
+
+
+def _encoded_principal(subject: str, *, provider: str = "google", claim_type: str = "sub") -> str:
+    payload = {
+        "auth_typ": provider,
+        "claims": [{"typ": claim_type, "val": subject}],
+        "name_typ": "name",
+        "role_typ": "roles",
+    }
+    return base64.b64encode(json.dumps(payload).encode()).decode()
 
 
 # ---------------------------------------------------------------------
@@ -167,7 +180,7 @@ def test_trust_true_unapproved_principal_cannot_operate(tmp_path: Path) -> None:
         response = client.post(
             "/api/v1/simulation/runs",
             json=_run_create_payload(),
-            headers={PRINCIPAL_ID_HEADER: "analyst-1"},
+            headers={PRINCIPAL_ID_HEADER: "analyst-1", PRINCIPAL_IDP_HEADER: "google"},
         )
         assert response.status_code == 403
 
@@ -195,6 +208,119 @@ def test_approved_google_user_is_authenticated_viewer(tmp_path: Path) -> None:
         )
         assert operation.status_code == 403
 
+        admin_operation = client.put(
+            "/api/v1/autonomy",
+            json=_autonomy_autonomous_payload("google-user-1"),
+            headers={PRINCIPAL_ID_HEADER: "google-user-1", PRINCIPAL_IDP_HEADER: "google"},
+        )
+        assert admin_operation.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "claim_type",
+    ["sub", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier"],
+)
+def test_approved_google_user_uses_client_principal_subject_when_id_header_missing(
+    tmp_path: Path, claim_type: str
+) -> None:
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["google-user-1"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={
+                PRINCIPAL_HEADER: _encoded_principal("google-user-1", claim_type=claim_type),
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is True
+        assert response.json()["role"] == "VIEWER"
+        assert response.json()["can_operate"] is False
+
+
+def test_consistent_convenience_and_encoded_google_identity_is_accepted(tmp_path: Path) -> None:
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={
+                PRINCIPAL_ID_HEADER: "approved-id",
+                PRINCIPAL_IDP_HEADER: "google",
+                PRINCIPAL_HEADER: _encoded_principal("approved-id"),
+            },
+        )
+        assert response.json()["authenticated"] is True
+
+
+def test_conflicting_subject_headers_fail_closed(tmp_path: Path) -> None:
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={
+                PRINCIPAL_ID_HEADER: "approved-id",
+                PRINCIPAL_HEADER: _encoded_principal("different-id"),
+                PRINCIPAL_IDP_HEADER: "google",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
+
+
+def test_conflicting_provider_headers_fail_closed(tmp_path: Path) -> None:
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={
+                PRINCIPAL_HEADER: _encoded_principal("approved-id", provider="aad"),
+                PRINCIPAL_IDP_HEADER: "google",
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
+
+
+def test_conflicting_subject_claims_fail_closed(tmp_path: Path) -> None:
+    encoded = base64.b64encode(
+        json.dumps(
+            {
+                "auth_typ": "google",
+                "claims": [
+                    {"typ": "sub", "val": "approved-id"},
+                    {
+                        "typ": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier",
+                        "val": "different-id",
+                    },
+                ],
+            }
+        ).encode()
+    ).decode()
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get("/api/v1/session", headers={PRINCIPAL_HEADER: encoded})
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
+
 
 def test_approved_id_with_wrong_provider_is_rejected(tmp_path: Path) -> None:
     settings = Settings(
@@ -214,6 +340,22 @@ def test_approved_id_with_wrong_provider_is_rejected(tmp_path: Path) -> None:
         assert response.json()["authenticated"] is False
         assert response.json()["can_operate"] is False
 
+
+def test_approved_id_without_provider_is_rejected(tmp_path: Path) -> None:
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["google-user-1"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={PRINCIPAL_ID_HEADER: "google-user-1"},
+        )
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
+
+
 def test_unapproved_google_user_remains_anonymous(tmp_path: Path) -> None:
     settings = Settings(
         **_base_settings_kwargs(tmp_path),
@@ -223,19 +365,23 @@ def test_unapproved_google_user_remains_anonymous(tmp_path: Path) -> None:
     for client in _client_with_settings(settings):
         response = client.get(
             "/api/v1/session",
-            headers={PRINCIPAL_ID_HEADER: "unknown-google-user", "X-MS-CLIENT-PRINCIPAL-IDP": "google"},
+            headers={
+                PRINCIPAL_ID_HEADER: "unknown-google-user",
+                "X-MS-CLIENT-PRINCIPAL-IDP": "google",
+            },
         )
         assert response.status_code == 200
         assert response.json()["authenticated"] is False
         assert response.json()["can_operate"] is False
 
-def test_trust_true_analyst_denied_admin_route(tmp_path: Path) -> None:
+
+def test_trust_true_unapproved_principal_denied_admin_route(tmp_path: Path) -> None:
     trusting_settings = Settings(**_base_settings_kwargs(tmp_path), TRUST_EASYAUTH_HEADERS=True)
     for client in _client_with_settings(trusting_settings):
         response = client.put(
             "/api/v1/autonomy",
             json=_autonomy_autonomous_payload("analyst-1"),
-            headers={PRINCIPAL_ID_HEADER: "analyst-1"},
+            headers={PRINCIPAL_ID_HEADER: "analyst-1", PRINCIPAL_IDP_HEADER: "aad"},
         )
         assert response.status_code == 403
 
@@ -250,14 +396,14 @@ def test_trust_true_configured_admin_principal_grants_admin(tmp_path: Path) -> N
         response = client.put(
             "/api/v1/autonomy",
             json=_autonomy_autonomous_payload("admin-1"),
-            headers={PRINCIPAL_ID_HEADER: "admin-1"},
+            headers={PRINCIPAL_ID_HEADER: "admin-1", PRINCIPAL_IDP_HEADER: "aad"},
         )
         assert response.status_code == 200
         body = response.json()
         assert body["mode"] == "autonomous"
 
 
-def test_trust_true_non_admin_principal_id_is_analyst_not_admin(tmp_path: Path) -> None:
+def test_trust_true_non_admin_principal_cannot_administer(tmp_path: Path) -> None:
     admin_settings = Settings(
         **_base_settings_kwargs(tmp_path),
         TRUST_EASYAUTH_HEADERS=True,
@@ -267,7 +413,7 @@ def test_trust_true_non_admin_principal_id_is_analyst_not_admin(tmp_path: Path) 
         response = client.put(
             "/api/v1/autonomy",
             json=_autonomy_autonomous_payload("analyst-2"),
-            headers={PRINCIPAL_ID_HEADER: "analyst-2"},
+            headers={PRINCIPAL_ID_HEADER: "analyst-2", PRINCIPAL_IDP_HEADER: "aad"},
         )
         assert response.status_code == 403
 
@@ -303,24 +449,45 @@ def test_principal_header_without_id_falls_back_to_anonymous_viewer(client: Test
     assert response.status_code == 200
 
 
-def test_malformed_principal_header_does_not_crash(tmp_path: Path) -> None:
-    # X-MS-CLIENT-PRINCIPAL-ID present alongside an X-MS-CLIENT-PRINCIPAL
-    # value that is not valid base64/JSON: decoding failure must be
-    # swallowed (logged, ignored) rather than raising/500ing. Requires
-    # TRUST_EASYAUTH_HEADERS=True to exercise the decode path at all — with
-    # the default False, the header is ignored outright regardless of its
-    # validity, which is covered separately above.
-    trusting_settings = Settings(**_base_settings_kwargs(tmp_path), TRUST_EASYAUTH_HEADERS=True)
+def test_malformed_principal_header_fails_closed(tmp_path: Path) -> None:
+    trusting_settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
     for client in _client_with_settings(trusting_settings):
-        response = client.post(
-            "/api/v1/simulation/runs",
-            json=_run_create_payload(),
+        response = client.get(
+            "/api/v1/session",
             headers={
-                PRINCIPAL_ID_HEADER: "analyst-3",
+                PRINCIPAL_ID_HEADER: "approved-id",
+                PRINCIPAL_IDP_HEADER: "google",
                 PRINCIPAL_HEADER: "not-valid-base64!!!",
             },
         )
-        assert response.status_code == 403
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
+
+
+def test_malformed_claims_fail_closed(tmp_path: Path) -> None:
+    malformed_claims = base64.b64encode(
+        json.dumps({"auth_typ": "google", "claims": "not-a-list"}).encode()
+    ).decode()
+    settings = Settings(
+        **_base_settings_kwargs(tmp_path),
+        TRUST_EASYAUTH_HEADERS=True,
+        GOOGLE_DASHBOARD_PRINCIPAL_IDS=["approved-id"],
+    )
+    for client in _client_with_settings(settings):
+        response = client.get(
+            "/api/v1/session",
+            headers={
+                PRINCIPAL_ID_HEADER: "approved-id",
+                PRINCIPAL_IDP_HEADER: "google",
+                PRINCIPAL_HEADER: malformed_claims,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["authenticated"] is False
 
 
 def test_no_headers_and_anonymous_disabled_requires_authentication(tmp_path: Path) -> None:

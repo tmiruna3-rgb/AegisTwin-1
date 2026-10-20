@@ -20,6 +20,11 @@ on:
         description: "Image tag to build and deploy (defaults to the triggering commit SHA)"
         required: false
         type: string
+      container_app_name:
+        description: "Existing Container App to update (restricted to the clean deployment)"
+        required: true
+        default: "ca-aegisarena-clean"
+        type: string
 
 # id-token: write is required for OIDC federation with Entra ID (azure/login
 # below exchanges this workflow's GitHub-issued OIDC token for an Azure AD
@@ -41,11 +46,14 @@ jobs:
     environment: production
     env:
       IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      CONTAINER_APP_NAME: ${{ inputs.container_app_name }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
       # These non-secret Environment variables preserve the operator-verified
       # Easy Auth/RBAC state across every declarative Container App release.
       # Secure defaults keep header trust disabled and grant no ADMIN users
       # until the documented post-bootstrap verification is complete.
       TRUST_EASYAUTH_HEADERS: ${{ vars.TRUST_EASYAUTH_HEADERS || 'false' }}
+      AUTH_IDENTITY_DIAGNOSTIC_ENABLED: ${{ vars.AUTH_IDENTITY_DIAGNOSTIC_ENABLED || 'false' }}
       ADMIN_PRINCIPAL_IDS_JSON: ${{ vars.ADMIN_PRINCIPAL_IDS_JSON || '[]' }}
       GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON: ${{ vars.GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON || '[]' }}
     steps:
@@ -53,8 +61,20 @@ jobs:
 
       - name: Validate authentication deployment variables
         run: |
+          if [[ "$CONTAINER_APP_NAME" != "ca-aegisarena-clean" ]]; then
+            echo "::error::This workflow is restricted to ca-aegisarena-clean; refusing target '$CONTAINER_APP_NAME'."
+            exit 1
+          fi
+          if [[ "$ACR_NAME" != "acraegisarenadevwzel" ]]; then
+            echo "::error::ACR_NAME must be acraegisarenadevwzel for the verified clean deployment."
+            exit 1
+          fi
           if [[ "$TRUST_EASYAUTH_HEADERS" != "true" && "$TRUST_EASYAUTH_HEADERS" != "false" ]]; then
             echo "::error::TRUST_EASYAUTH_HEADERS must be exactly 'true' or 'false'."
+            exit 1
+          fi
+          if [[ "$AUTH_IDENTITY_DIAGNOSTIC_ENABLED" != "true" && "$AUTH_IDENTITY_DIAGNOSTIC_ENABLED" != "false" ]]; then
+            echo "::error::AUTH_IDENTITY_DIAGNOSTIC_ENABLED must be exactly 'true' or 'false'."
             exit 1
           fi
           if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' \
@@ -96,15 +116,24 @@ jobs:
                  "docs/deployment/AZURE_DEPLOYMENT.md before using this workflow."
             exit 1
           fi
-          if ! az acr show --name "${{ vars.ACR_NAME }}" --resource-group rg-aegisarena-dev >/dev/null 2>&1; then
-            echo "::error::Container Registry '${{ vars.ACR_NAME }}' was not found in" \
+          if ! az acr show --name "$ACR_NAME" --resource-group rg-aegisarena-dev >/dev/null 2>&1; then
+            echo "::error::Container Registry '$ACR_NAME' was not found in" \
                  "rg-aegisarena-dev. This workflow only performs POST-BOOTSTRAP" \
                  "deployments. Run the manual PASS 1 bootstrap and confirm the" \
                  "ACR_NAME repository variable matches the actual deployed registry" \
                  "name — see docs/deployment/AZURE_DEPLOYMENT.md."
             exit 1
           fi
-          echo "Bootstrap infrastructure verified: resource group and ACR exist."
+          if ! az resource show \
+            --name "$CONTAINER_APP_NAME" \
+            --resource-group rg-aegisarena-dev \
+            --resource-type Microsoft.App/containerApps \
+            --api-version 2025-01-01 >/dev/null 2>&1; then
+            echo "::error::Container App '$CONTAINER_APP_NAME' was not found in rg-aegisarena-dev." \
+                 "This workflow only updates the existing clean deployment and will not create a replacement."
+            exit 1
+          fi
+          echo "Deployment target verified: rg-aegisarena-dev/$CONTAINER_APP_NAME."
 
       # AZURE_CLIENT_ID/AZURE_TENANT_ID/AZURE_SUBSCRIPTION_ID are non-secret
       # identifiers (they identify *which* identity/tenant/subscription, not
@@ -113,7 +142,7 @@ jobs:
       # preference for variables over secrets wherever a value isn't
       # actually sensitive.
       - name: ACR login
-        run: az acr login --name ${{ vars.ACR_NAME }}
+        run: az acr login --name "$ACR_NAME"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -128,8 +157,8 @@ jobs:
           file: backend/Dockerfile
           push: true
           tags: |
-            ${{ vars.ACR_NAME }}.azurecr.io/aegisarena/backend:${{ env.IMAGE_TAG }}
-            ${{ vars.ACR_NAME }}.azurecr.io/aegisarena/backend:latest
+            ${{ env.ACR_NAME }}.azurecr.io/aegisarena/backend:${{ env.IMAGE_TAG }}
+            ${{ env.ACR_NAME }}.azurecr.io/aegisarena/backend:latest
           cache-from: type=gha,scope=backend-deploy
           cache-to: type=gha,mode=max,scope=backend-deploy
 
@@ -149,8 +178,8 @@ jobs:
           file: frontend/Dockerfile
           push: true
           tags: |
-            ${{ vars.ACR_NAME }}.azurecr.io/aegisarena/frontend:${{ env.IMAGE_TAG }}
-            ${{ vars.ACR_NAME }}.azurecr.io/aegisarena/frontend:latest
+            ${{ env.ACR_NAME }}.azurecr.io/aegisarena/frontend:${{ env.IMAGE_TAG }}
+            ${{ env.ACR_NAME }}.azurecr.io/aegisarena/frontend:latest
           cache-from: type=gha,scope=frontend-deploy
           cache-to: type=gha,mode=max,scope=frontend-deploy
 
@@ -174,16 +203,21 @@ jobs:
       # variables. Their secure fallbacks are false/[], but once an operator
       # has verified Easy Auth and stored the real values, every normal release
       # preserves that state instead of silently disabling sign-in or ADMIN.
+      # Incremental mode also leaves the separately managed
+      # Microsoft.App/containerApps/authConfigs/current child resource intact.
       - name: Deploy application release (Bicep)
         id: deploy
         run: |
           az deployment group create \
             --name "aegisarena-release-${{ env.IMAGE_TAG }}" \
             --resource-group rg-aegisarena-dev \
+            --mode Incremental \
             --template-file infra/azure/app.bicep \
-            --parameters acrName="${{ vars.ACR_NAME }}" \
+            --parameters containerAppName="$CONTAINER_APP_NAME" \
+            --parameters acrName="$ACR_NAME" \
             --parameters imageTag="${{ env.IMAGE_TAG }}" \
             --parameters trustEasyAuthHeaders="$TRUST_EASYAUTH_HEADERS" \
+            --parameters authIdentityDiagnosticEnabled="$AUTH_IDENTITY_DIAGNOSTIC_ENABLED" \
             --parameters adminPrincipalIds="$ADMIN_PRINCIPAL_IDS_JSON" \
             --parameters googleDashboardPrincipalIds="$GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON" \
             --query "properties.outputs" -o json > deployment-outputs.json
@@ -197,10 +231,7 @@ jobs:
           fqdn=$(jq -r '.containerAppFqdn.value' deployment-outputs.json)
           echo "container_app_fqdn=${fqdn}" >> "$GITHUB_OUTPUT"
 
-      # Health gate: Container Apps runs with minReplicas=0 in steady state
-      # (see docs/deployment/COST_CONTROL.md), so the very first request
-      # after a scale-to-zero period cold-starts the revision. Retry with
-      # backoff instead of failing immediately on the first miss.
+      # Health gate: retry with backoff while the new single revision starts.
       - name: Health gate - liveness
         run: |
           fqdn="${{ steps.outputs.outputs.container_app_fqdn }}"

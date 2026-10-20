@@ -28,6 +28,9 @@ param location string = 'centralindia'
 @description('Name of the existing Container Apps Environment created by the bootstrap (main.bicep).')
 param containerAppsEnvironmentName string = 'cae-aegisarena-dev'
 
+@description('Name of the existing Azure Container App to update.')
+param containerAppName string = 'ca-aegisarena-clean'
+
 @description('Name of the existing Azure Container Registry created by the bootstrap. This has a generated suffix (e.g. acraegisarenadevab12) and has no safe default — pass it explicitly (the CD workflow already has this as the ACR_NAME repository variable).')
 param acrName string
 
@@ -40,8 +43,8 @@ param keyVaultName string = 'kv-aegis-${uniqueString(resourceGroup().id)}'
 @description('Immutable image tag (e.g. a git SHA) applied to both containers. "latest" is a placeholder for local iteration only — real releases MUST override this with an immutable tag.')
 param imageTag string = 'latest'
 
-@description('Minimum Container App replicas (0 = scale to zero when idle).')
-param minReplicas int = 0
+@description('Minimum Container App replicas for the working clean deployment.')
+param minReplicas int = 1
 
 @description('Maximum Container App replicas.')
 param maxReplicas int = 1
@@ -63,6 +66,9 @@ never change this template's default.
 ''')
 param trustEasyAuthHeaders bool = false
 
+@description('Temporarily enables the operator-keyed Google identity enrollment diagnostic. Defaults to false.')
+param authIdentityDiagnosticEnabled bool = false
+
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' existing = {
   name: containerAppsEnvironmentName
 }
@@ -83,6 +89,7 @@ module containerApp 'modules/containerapp.bicep' = {
   name: 'aegisarena-containerapp-release'
   params: {
     location: location
+    containerAppName: containerAppName
     containerAppsEnvironmentId: containerAppsEnvironment.id
     acrLoginServer: acr.properties.loginServer
     appIdentityId: appIdentity.id
@@ -90,12 +97,17 @@ module containerApp 'modules/containerapp.bicep' = {
     imageTag: imageTag
     minReplicas: minReplicas
     maxReplicas: maxReplicas
+    // The verified clean revision uses ephemeral model storage and has no
+    // Azure Files volume or mount. Existing storage resources are untouched.
+    modelArtifactStorageName: ''
     adminPrincipalIds: adminPrincipalIds
     googleDashboardPrincipalIds: googleDashboardPrincipalIds
     trustEasyAuthHeaders: trustEasyAuthHeaders
+    authIdentityDiagnosticEnabled: authIdentityDiagnosticEnabled
   }
 }
 
 // Safe outputs only — never a password or connection string (this template
 // never touches PostgreSQL/Key Vault secret values in the first place).
+output containerAppName string = containerApp.outputs.containerAppName
 output containerAppFqdn string = containerApp.outputs.containerAppFqdn

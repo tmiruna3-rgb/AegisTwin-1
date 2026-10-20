@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # backend/ - relative MODEL_ARTIFACT_DIR values are anchored here so the
@@ -62,7 +62,9 @@ class Settings(BaseSettings):
             if not isinstance(parsed, list) or not all(
                 isinstance(item, str) and item.strip() for item in parsed
             ):
-                raise ValueError("GOOGLE_DASHBOARD_PRINCIPAL_IDS must be a JSON array of non-empty strings")
+                raise ValueError(
+                    "GOOGLE_DASHBOARD_PRINCIPAL_IDS must be a JSON array of non-empty strings"
+                )
             return parsed
         return value
 
@@ -76,6 +78,28 @@ class Settings(BaseSettings):
     # explicitly, those headers must never be trusted — see
     # docs/security/AUTHENTICATION.md.
     trust_easyauth_headers: bool = Field(default=False, validation_alias="TRUST_EASYAUTH_HEADERS")
+    # Temporary, operator-controlled enrollment diagnostic. The endpoint is
+    # hidden unless explicitly enabled and requires this key on every request.
+    # Keep both unset in ordinary deployments and remove after enrollment.
+    auth_identity_diagnostic_enabled: bool = Field(
+        default=False, validation_alias="AUTH_IDENTITY_DIAGNOSTIC_ENABLED"
+    )
+    auth_identity_diagnostic_key: SecretStr | None = Field(
+        default=None, validation_alias="AUTH_IDENTITY_DIAGNOSTIC_KEY"
+    )
+
+    @field_validator("auth_identity_diagnostic_key")
+    @classmethod
+    def validate_auth_identity_diagnostic_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value()
+        if len(secret) < 32 or secret != secret.strip():
+            raise ValueError(
+                "AUTH_IDENTITY_DIAGNOSTIC_KEY must be at least 32 characters with no "
+                "leading or trailing whitespace"
+            )
+        return value
 
     @field_validator("api_prefix")
     @classmethod
@@ -158,6 +182,11 @@ class Settings(BaseSettings):
     def model_post_init(self, __context: Any) -> None:
         if self.environment == "production" and self.auth_dev_bypass_role:
             raise ValueError("AUTH_DEV_BYPASS_ROLE must not be set when ENVIRONMENT=production")
+        if self.auth_identity_diagnostic_enabled and self.auth_identity_diagnostic_key is None:
+            raise ValueError(
+                "AUTH_IDENTITY_DIAGNOSTIC_KEY is required when "
+                "AUTH_IDENTITY_DIAGNOSTIC_ENABLED=true"
+            )
         if self.environment != "production":
             self.cors_origins = expand_loopback_origins(self.cors_origins)
 
