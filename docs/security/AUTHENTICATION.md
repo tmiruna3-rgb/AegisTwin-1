@@ -94,6 +94,31 @@ when its stable ID is explicitly present in `GOOGLE_DASHBOARD_PRINCIPAL_IDS`.
 An unlisted Google identity stays anonymous, and an approved Google viewer
 still cannot call `ANALYST` or `ADMIN` routes.
 
+## Google provider client secret
+
+The live `authConfigs/current` resource refers to the Container App secret
+named `google-provider-authentication-secret`. Normal releases deliberately do
+not redeploy that authentication child resource, but they do declaratively
+update the parent Container App. Consequently, the secret must be present in
+the Bicep `configuration.secrets` array; incremental deployment does not make
+an omitted property safe to retain.
+
+The clean-app release template preserves the existing secret **name** while
+changing its source to a versionless reference to the same-named secret in the
+existing Key Vault. The runtime managed identity reads it. No OAuth client
+secret is stored in source control, passed to Bicep/GitHub Actions, emitted as
+an output, or logged. A name-only Container App secret is not used because the
+Azure schema requires either a value or a Key Vault reference.
+
+This creates a one-time manual prerequisite before this template may be
+deployed: an authorized operator must import the existing value from its
+authoritative protected source into the existing Key Vault. The workflow's
+`GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY=true` Environment variable records
+completion without containing any secret material and otherwise blocks the
+release. See `docs/deployment/AZURE_DEPLOYMENT.md` for the controlled procedure
+and what-if command. If the source is unavailable, deployment remains blocked;
+do not extract the live Container App secret as a workaround.
+
 ## Temporary Google identity enrollment diagnostic
 
 `GET /api/v1/session/header-probe` is a temporary, disabled-by-default

@@ -60,6 +60,9 @@ param trustEasyAuthHeaders bool = false
 @description('Temporarily enables the operator-keyed Google identity enrollment diagnostic. The key is read from the existing Key Vault secret auth-identity-diagnostic-key.')
 param authIdentityDiagnosticEnabled bool = false
 
+@description('Declares the existing Google provider secret as a Key Vault-backed Container App secret. Enable only after an operator has securely populated the matching secret in the existing Key Vault.')
+param googleProviderAuthenticationSecretKeyVaultEnabled bool = false
+
 @description('Container Apps Environment storage (Azure Files) mounted at /data for model artifacts. Empty = no mount: artifacts then live on the ephemeral container filesystem and are rebuilt deterministically on first use after a restart.')
 param modelArtifactStorageName string = 'modelartifacts'
 
@@ -68,6 +71,8 @@ var backendImage = '${acrLoginServer}/aegisarena/backend:${imageTag}'
 // Container Apps' native Key Vault secret reference wants the secret's full
 // vault URL (not just the vault URI) — keyVaultUri already ends in '/'.
 var databaseUrlSecretUri = '${keyVaultUri}secrets/database-url'
+var googleProviderAuthenticationSecretName = 'google-provider-authentication-secret'
+var googleProviderAuthenticationSecretUri = '${keyVaultUri}secrets/${googleProviderAuthenticationSecretName}'
 var authIdentityDiagnosticSecretName = 'auth-identity-diagnostic-key'
 var authIdentityDiagnosticSecretUri = '${keyVaultUri}secrets/${authIdentityDiagnosticSecretName}'
 
@@ -109,6 +114,18 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
             identity: appIdentityId
           }
         ],
+        googleProviderAuthenticationSecretKeyVaultEnabled
+          ? [
+              {
+                // Keep the Container App secret name referenced by the
+                // separately managed authConfigs/current resource. Its
+                // value remains in Key Vault and never enters ARM params.
+                name: googleProviderAuthenticationSecretName
+                keyVaultUrl: googleProviderAuthenticationSecretUri
+                identity: appIdentityId
+              }
+            ]
+          : [],
         authIdentityDiagnosticEnabled
           ? [
               {

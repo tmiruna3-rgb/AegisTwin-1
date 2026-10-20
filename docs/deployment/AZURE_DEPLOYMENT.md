@@ -210,6 +210,66 @@ confusion when reading deployment history later.)
 Review the plan output for unexpected deletions/replacements before running
 an actual deployment.
 
+For a normal release to the existing clean app, run the resource-group
+what-if with an explicit immutable tag that already exists for both images.
+Also pass the current authentication values explicitly; relying on their safe
+defaults would intentionally reset trust and allowlists:
+
+```bash
+az deployment group what-if \
+  --name aegisarena-release-what-if \
+  --resource-group rg-aegisarena-dev \
+  --mode Incremental \
+  --template-file infra/azure/app.bicep \
+  --parameters containerAppName=ca-aegisarena-clean \
+  --parameters acrName=acraegisarenadevwzel \
+  --parameters imageTag='<immutable-tag-present-on-both-images>' \
+  --parameters trustEasyAuthHeaders='<current-true-or-false>' \
+  --parameters authIdentityDiagnosticEnabled=false \
+  --parameters adminPrincipalIds='<current-JSON-array>' \
+  --parameters googleDashboardPrincipalIds='<current-JSON-array>'
+```
+
+### One-time Google provider secret migration prerequisite
+
+An ARM/Bicep update treats the Container App resource body as its desired
+state even in incremental mode. A secret omitted from
+`properties.configuration.secrets` is therefore not safely preserved. The
+Container Apps secret schema supports either a direct `value` or a
+`keyVaultUrl` plus `identity`; a name-only entry is not a supported
+preservation mechanism.
+
+`infra/azure/app.bicep` now declares
+`google-provider-authentication-secret` with the same Container App secret
+name already referenced by the separately managed `authConfigs/current`
+resource, but sources it from the versionless Key Vault URI
+`secrets/google-provider-authentication-secret`. The template never reads,
+outputs, or accepts the OAuth client secret value.
+
+Before the first release with this template, an authorized operator must:
+
+1. Obtain the existing OAuth client secret from its authoritative protected
+   source (for example, the organization's credential manager). Do not export
+   it from the Container App, place it in a command line, shell history,
+   repository, Bicep parameter, GitHub variable, or workflow log.
+2. Using the Azure portal's masked Key Vault secret-entry form or an
+   equivalently controlled secret-management process, import it into the
+   **existing** AegisArena Key Vault with the exact name
+   `google-provider-authentication-secret`. Do not create a new vault or a new
+   Container App. The existing `id-aegisarena-app` identity already has Key
+   Vault Secrets User on this vault.
+3. Run the resource-group what-if above. Require the Container App secret to
+   remain under the same name and change to a Key Vault reference; reject any
+   plan that removes it, changes `authConfigs/current`, or replaces the app.
+4. Set the protected GitHub `production` Environment variable
+   `GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY=true`. This is a non-secret
+   operator attestation. The workflow fails closed while it is absent or not
+   exactly `true`.
+
+If the authoritative client-secret source is unavailable, stop. Name-only
+preservation is not safe, and extracting the live value or rotating the Google
+credential requires a separately approved procedure outside this release.
+
 ### Set GitHub repository variables (non-secret identifiers)
 
 Settings → Secrets and variables → Actions → Variables:
@@ -222,12 +282,14 @@ Settings → Secrets and variables → Actions → Variables:
 | `ACR_NAME` | The **actual deployed** registry name — read it from PASS 1's `acrLoginServer` output (it is `acraegisarenadev` plus a short generated suffix, e.g. `acraegisarenadevab12`, stripped of the trailing `.azurecr.io`), not the bare `acraegisarenadev` base name |
 | `TRUST_EASYAUTH_HEADERS` | `false` until Easy Auth is configured and verified; then `true` so later releases preserve the verified trust boundary |
 | `AUTH_IDENTITY_DIAGNOSTIC_ENABLED` | `false` normally; temporarily `true` only while enrolling an approved Google identity using the existing Key Vault secret `auth-identity-diagnostic-key` |
+| `GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY` | `true` only after the one-time Google provider secret migration above is complete; the workflow refuses deployment otherwise |
 | `ADMIN_PRINCIPAL_IDS_JSON` | JSON array of verified Entra principal object IDs granted ADMIN, for example `["00000000-0000-0000-0000-000000000000"]`; use `[]` before configuration |
 | `GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON` | JSON array of verified Google stable principal IDs granted authenticated VIEWER dashboard access; use `[]` before enrollment |
 
-These are identifiers, not credentials — there is no secret material in any
-of them, which is why they are GitHub *variables* rather than *secrets*
-(and why `deploy-azure.yml` reads them via `vars.*`).
+These are identifiers, configuration, or an operator attestation, not
+credentials — there is no secret material in any of them, which is why they
+are GitHub *variables* rather than *secrets* (and why `deploy-azure.yml` reads
+them via `vars.*`).
 
 ### No GitHub secret is needed for normal releases
 
@@ -268,7 +330,9 @@ if left blank). It will:
 2. **Preflight-check** that `rg-aegisarena-dev` and the configured
    `ACR_NAME` registry already exist, failing immediately with a message
    pointing back to this document if they don't — it will not attempt to
-   create first-time infrastructure.
+   create first-time infrastructure. It also refuses to proceed until
+   `GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY=true` confirms the one-time secret
+   migration prerequisite.
 3. `az acr login` and build+push the backend and frontend images, tagged
    both with the immutable SHA and `:latest` (SHA tag is what actually gets
    deployed).

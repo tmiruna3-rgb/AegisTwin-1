@@ -104,6 +104,10 @@ module containerApp 'modules/containerapp.bicep' = {
     googleDashboardPrincipalIds: googleDashboardPrincipalIds
     trustEasyAuthHeaders: trustEasyAuthHeaders
     authIdentityDiagnosticEnabled: authIdentityDiagnosticEnabled
+    // The clean app's authConfigs/current resource already references this
+    // Container App secret name. The value must first be imported manually
+    // into the existing Key Vault; the release template never reads it.
+    googleProviderAuthenticationSecretKeyVaultEnabled: true
   }
 }
 

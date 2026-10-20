@@ -95,6 +95,10 @@ def test_azure_release_preserves_verified_authentication_configuration() -> None
         "GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON: "
         "${{ vars.GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON || '[]' }}"
     ) in workflow
+    assert (
+        "GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY: "
+        "${{ vars.GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY || 'false' }}"
+    ) in workflow
     assert '--parameters trustEasyAuthHeaders="$TRUST_EASYAUTH_HEADERS"' in workflow
     assert (
         '--parameters authIdentityDiagnosticEnabled="$AUTH_IDENTITY_DIAGNOSTIC_ENABLED"'
@@ -107,6 +111,11 @@ def test_azure_release_preserves_verified_authentication_configuration() -> None
     )
     assert "TRUST_EASYAUTH_HEADERS must be exactly 'true' or 'false'" in workflow
     assert "AUTH_IDENTITY_DIAGNOSTIC_ENABLED must be exactly 'true' or 'false'" in workflow
+    assert "GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY is exactly 'true'" in workflow
+    migration_guard = workflow.index(
+        "GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY is exactly 'true'"
+    )
+    assert migration_guard < workflow.index("uses: azure/login@v2")
     assert "ADMIN_PRINCIPAL_IDS_JSON must be a JSON array" in workflow
     assert "param containerAppName string = 'ca-aegisarena-clean'" in app_template
     assert "param authIdentityDiagnosticEnabled bool = false" in app_template
@@ -114,5 +123,25 @@ def test_azure_release_preserves_verified_authentication_configuration() -> None
     assert "param trustEasyAuthHeaders bool = false" in app_template
     assert "param googleDashboardPrincipalIds array = []" in app_template
     assert "secretRef: authIdentityDiagnosticSecretName" in module
+    assert "googleProviderAuthenticationSecretKeyVaultEnabled: true" in app_template
+    assert (
+        "param googleProviderAuthenticationSecretKeyVaultEnabled bool = false"
+        in module
+    )
+    assert (
+        "var googleProviderAuthenticationSecretName = "
+        "'google-provider-authentication-secret'"
+    ) in module
+    assert (
+        "var googleProviderAuthenticationSecretUri = "
+        "'${keyVaultUri}secrets/${googleProviderAuthenticationSecretName}'"
+    ) in module
+    assert (
+        "name: googleProviderAuthenticationSecretName\n"
+        "                keyVaultUrl: googleProviderAuthenticationSecretUri\n"
+        "                identity: appIdentityId"
+    ) in module
+    assert "listSecrets" not in app_template
+    assert "listSecrets" not in module
     assert "Microsoft.App/containerApps/authConfigs" not in app_template
     assert "Microsoft.App/containerApps/authConfigs" not in module

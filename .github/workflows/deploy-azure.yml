@@ -56,6 +56,10 @@ jobs:
       AUTH_IDENTITY_DIAGNOSTIC_ENABLED: ${{ vars.AUTH_IDENTITY_DIAGNOSTIC_ENABLED || 'false' }}
       ADMIN_PRINCIPAL_IDS_JSON: ${{ vars.ADMIN_PRINCIPAL_IDS_JSON || '[]' }}
       GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON: ${{ vars.GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON || '[]' }}
+      # Fail closed until an operator confirms that the existing OAuth client
+      # secret has been imported into the existing Key Vault under the exact
+      # name used by app.bicep. This is an attestation, not secret material.
+      GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY: ${{ vars.GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY || 'false' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,6 +79,10 @@ jobs:
           fi
           if [[ "$AUTH_IDENTITY_DIAGNOSTIC_ENABLED" != "true" && "$AUTH_IDENTITY_DIAGNOSTIC_ENABLED" != "false" ]]; then
             echo "::error::AUTH_IDENTITY_DIAGNOSTIC_ENABLED must be exactly 'true' or 'false'."
+            exit 1
+          fi
+          if [[ "$GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY" != "true" ]]; then
+            echo "::error::Refusing deployment until GOOGLE_PROVIDER_SECRET_KEY_VAULT_READY is exactly 'true'. Complete the documented Key Vault migration first."
             exit 1
           fi
           if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' \
