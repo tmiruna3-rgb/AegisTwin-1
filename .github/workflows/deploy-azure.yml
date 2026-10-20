@@ -223,3 +223,5 @@ jobs:
           done
           echo "Readiness check failed after 5 attempts"
           exit 1
+
+# Register manual deployment workflow on default branch.
