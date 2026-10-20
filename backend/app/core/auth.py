@@ -82,6 +82,7 @@ def resolve_principal(request: Request, settings: Settings) -> Principal:
     if settings.trust_easyauth_headers:
         principal_id = request.headers.get("X-MS-CLIENT-PRINCIPAL-ID")
         principal_header = request.headers.get("X-MS-CLIENT-PRINCIPAL")
+        principal_provider = request.headers.get("X-MS-CLIENT-PRINCIPAL-IDP", "").lower()
 
         if principal_id:
             # Header content is decoded for future claim-based use (e.g.
@@ -90,8 +91,15 @@ def resolve_principal(request: Request, settings: Settings) -> Principal:
             # allow-list.
             if principal_header:
                 _decode_client_principal(principal_header)
-            role = Role.ADMIN if principal_id in settings.admin_principal_ids else Role.ANALYST
-            return Principal(role=role, subject=principal_id, authenticated=True)
+            if principal_id in settings.admin_principal_ids:
+                role = Role.ADMIN
+            elif principal_provider == "google" and principal_id in settings.google_dashboard_principal_ids:
+                role = Role.VIEWER
+            else:
+                role = None
+
+            if role is not None:
+                return Principal(role=role, subject=principal_id, authenticated=True)
 
     if settings.allow_anonymous_viewer:
         return Principal(role=Role.VIEWER, subject=None, authenticated=False)

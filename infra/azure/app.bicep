@@ -49,6 +49,9 @@ param maxReplicas int = 1
 @description('Entra/Easy-Auth principal IDs (object IDs) granted ADMIN role. Empty by default — see docs/security/AUTHENTICATION.md.')
 param adminPrincipalIds array = []
 
+@description('Approved Google principal IDs for read-only dashboard access.')
+param googleDashboardPrincipalIds array = []
+
 @description('''
 Sets TRUST_EASYAUTH_HEADERS on the Container App. MUST default to false.
 Normal post-bootstrap releases keep this false until an operator has
@@ -88,6 +91,7 @@ module containerApp 'modules/containerapp.bicep' = {
     minReplicas: minReplicas
     maxReplicas: maxReplicas
     adminPrincipalIds: adminPrincipalIds
+    googleDashboardPrincipalIds: googleDashboardPrincipalIds
     trustEasyAuthHeaders: trustEasyAuthHeaders
   }
 }

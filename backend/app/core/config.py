@@ -49,6 +49,23 @@ class Settings(BaseSettings):
     admin_principal_ids: Annotated[list[str], NoDecode] = Field(
         default_factory=list, validation_alias="ADMIN_PRINCIPAL_IDS"
     )
+    google_dashboard_principal_ids: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias="GOOGLE_DASHBOARD_PRINCIPAL_IDS",
+    )
+
+    @field_validator("google_dashboard_principal_ids", mode="before")
+    @classmethod
+    def parse_google_dashboard_principal_ids(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            parsed = json.loads(value)
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, str) and item.strip() for item in parsed
+            ):
+                raise ValueError("GOOGLE_DASHBOARD_PRINCIPAL_IDS must be a JSON array of non-empty strings")
+            return parsed
+        return value
+
     allow_anonymous_viewer: bool = Field(default=True, validation_alias="ALLOW_ANONYMOUS_VIEWER")
     auth_dev_bypass_role: str | None = Field(default=None, validation_alias="AUTH_DEV_BYPASS_ROLE")
     docs_enabled: bool = Field(default=True, validation_alias="DOCS_ENABLED")

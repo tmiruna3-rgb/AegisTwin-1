@@ -47,6 +47,7 @@ jobs:
       # until the documented post-bootstrap verification is complete.
       TRUST_EASYAUTH_HEADERS: ${{ vars.TRUST_EASYAUTH_HEADERS || 'false' }}
       ADMIN_PRINCIPAL_IDS_JSON: ${{ vars.ADMIN_PRINCIPAL_IDS_JSON || '[]' }}
+      GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON: ${{ vars.GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON || '[]' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,6 +63,11 @@ jobs:
             exit 1
           fi
 
+          if ! jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' \
+            <<< "$GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON" >/dev/null; then
+            echo "::error::GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON must be a JSON array of non-empty strings."
+            exit 1
+          fi
       # OIDC login: exchanges the job's short-lived GitHub OIDC token for an
       # Azure AD token, scoped to the `id-aegisarena-github` user-assigned
       # managed identity via a federated credential (configured once, outside
@@ -179,6 +185,7 @@ jobs:
             --parameters imageTag="${{ env.IMAGE_TAG }}" \
             --parameters trustEasyAuthHeaders="$TRUST_EASYAUTH_HEADERS" \
             --parameters adminPrincipalIds="$ADMIN_PRINCIPAL_IDS_JSON" \
+            --parameters googleDashboardPrincipalIds="$GOOGLE_DASHBOARD_PRINCIPAL_IDS_JSON" \
             --query "properties.outputs" -o json > deployment-outputs.json
           cat deployment-outputs.json
 

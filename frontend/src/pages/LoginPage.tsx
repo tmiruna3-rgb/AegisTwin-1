@@ -61,7 +61,7 @@ export function LoginPage() {
     }
   }, [destination, navigate])
 
-  const signInUrl = `/.auth/login/aad?post_login_redirect_uri=${encodeURIComponent(destination)}`
+  const signInUrl = `/.auth/login/google?post_login_redirect_uri=${encodeURIComponent(destination)}`
 
   return (
     <main className="login-shell">
@@ -145,7 +145,7 @@ export function LoginPage() {
               <i />
               <i />
             </span>
-            {checking ? 'Checking your session…' : 'Sign in with Microsoft'}
+            {checking ? 'Checking your session…' : 'Sign in with Google'}
             <ArrowRight aria-hidden="true" />
           </a>
           <div className="login-divider">
@@ -156,7 +156,7 @@ export function LoginPage() {
           <div className="login-security-note">
             <ShieldCheck />
             <span>
-              <strong>Authentication is handled by Microsoft Entra ID.</strong>Your password and
+              <strong>Authentication is handled by Google through Azure.</strong>Your password and
               access token are never collected by this interface.
             </span>
           </div>

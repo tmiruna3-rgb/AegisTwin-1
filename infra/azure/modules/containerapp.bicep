@@ -44,6 +44,9 @@ param maxReplicas int = 1
 @description('Entra/Easy-Auth principal IDs (object IDs) granted ADMIN role. Empty by default — set explicitly per docs/security/AUTHENTICATION.md before relying on ADMIN-tier actions.')
 param adminPrincipalIds array = []
 
+@description('Google principal IDs approved for read-only dashboard access.')
+param googleDashboardPrincipalIds array = []
+
 @description('''
 Sets the backend container's TRUST_EASYAUTH_HEADERS env var. MUST default
 to false — Azure Container Apps Easy Auth is configured manually, after
@@ -158,6 +161,10 @@ resource containerApp 'Microsoft.App/containerApps@2025-01-01' = {
             {
               name: 'ADMIN_PRINCIPAL_IDS'
               value: join(adminPrincipalIds, ',')
+            }
+            {
+              name: 'GOOGLE_DASHBOARD_PRINCIPAL_IDS'
+              value: string(googleDashboardPrincipalIds)
             }
             {
               // Explicitly declared (not merely relying on the app's own
